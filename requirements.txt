@@ -1,0 +1,8 @@
+fastapi
+pydantic
+llama-cpp-python
+yt-dlp
+uvicorn
+requests
+opencv-python
+python-dotenv
