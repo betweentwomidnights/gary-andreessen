@@ -9,6 +9,9 @@ import fs from 'fs';
 import path from 'path';
 import VideoProcessor from './videoProcessor.mjs';
 import GlitchProcessor from './glitchProcessor.mjs';
+import TwitterHandler from './twitter-handler.mjs';
+
+const twitterHandler = new TwitterHandler();
 
 const videoProcessor = new VideoProcessor();
 
@@ -179,15 +182,29 @@ async function continueGeneration(channelId, message) {
         lastGenerationCache.set(channelId, {
             ...lastGeneration,
             taskId: task_id,
-            audioData: audioData
+            audioData: audioData,
+            videoBuffer: finalVideoBuffer  // Update with new video
         });
 
         // Send both video and audio
         const videoAttachment = new AttachmentBuilder(finalVideoBuffer, { name: 'marc_beats_continued.mp4' });
         const audioAttachment = new AttachmentBuilder(mp3Buffer, { name: 'marc_beats_continued.mp3' });
 
+        // Construct reply message using stored text
+        let replyContent = '🎵 heres your continued beat homie\n';
+        if (lastGeneration.originalTranscript) {
+            replyContent += `🎤 original: "${lastGeneration.originalTranscript}"\n`;
+            if (lastGeneration.transcript) {
+                replyContent += `✨ transformed: "${lastGeneration.transcript}"\n`;
+            }
+            if (lastGeneration.tweetText) {
+                replyContent += `🐦 tweet draft: "${lastGeneration.tweetText}"\n`;
+            }
+        }
+        replyContent += '📱 say "post that" if u want me to tweet this';
+
         await message.reply({
-            content: '🎵 heres your continued beat homie',
+            content: replyContent,
             files: [videoAttachment, audioAttachment]
         });
 
@@ -295,8 +312,58 @@ const createVideoWithAudio = async (videoOrImage, audioBuffer, useEffects = fals
     }
 };
 
-// Modify the handleGenerateCommand to store the generation info
-async function handleGenerateCommand(message, youtubeUrl) {
+async function getVideoTitle(videoId) {
+    try {
+        const response = await fetch(`${FASTAPI_URL}/video_title`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ video_id: videoId })
+        });
+        
+        if (!response.ok) {
+            throw new Error('Failed to get video title');
+        }
+        
+        const data = await response.json();
+        return data.title;
+    } catch (error) {
+        console.error('Error getting video title:', error);
+        return null;
+    }
+}
+
+async function generateTweetText(transformedText, videoId) {
+    try {
+        // Get video title
+        const videoTitle = await getVideoTitle(videoId);
+        if (!videoTitle) {
+            console.warn('Could not get video title');
+            return transformedText; // Fall back to transformed text only
+        }
+
+        // Generate tweet text using both transformed text and video title
+        const tweetResponse = await fetch(`${FASTAPI_URL}/generate_tweet`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                transformed_text: transformedText,
+                video_title: videoTitle
+            })
+        });
+
+        if (!tweetResponse.ok) {
+            throw new Error('Failed to generate tweet text');
+        }
+
+        const tweetData = await tweetResponse.json();
+        return tweetData.success ? tweetData.tweet : transformedText;
+    } catch (error) {
+        console.error('Error generating tweet text:', error);
+        return transformedText; // Fall back to transformed text
+    }
+}
+
+async function handleGenerateCommand(message, youtubeUrl, transcript = null) {
     const { valid, videoId, timestamp } = parseYouTubeUrl(youtubeUrl);
     
     if (!valid) {
@@ -333,6 +400,54 @@ async function handleGenerateCommand(message, youtubeUrl) {
 
         const frameBuffer = Buffer.from(await frameResponse.arrayBuffer());
 
+        // Try to transcribe the clip using Whisper
+        const formData = new FormData();
+        formData.append('file', new Blob([clipBuffer], { type: 'video/mp4' }));
+        
+        const transcriptResponse = await fetch(`${FASTAPI_URL}/transcribe_buffer`, {
+            method: 'POST',
+            body: formData
+        });
+
+        let speechText = null;
+        let transformedText = null;
+        let tweetText = null;
+        
+        if (transcriptResponse.ok) {
+            const transcriptData = await transcriptResponse.json();
+            if (transcriptData.success && transcriptData.text) {
+                speechText = transcriptData.text;
+                await processingMessage.edit(`🎤 transcribed: "${speechText}"\n🔄 transforming...`);
+                
+                // Transform the transcribed text
+                try {
+                    const transformResponse = await fetch(`${FASTAPI_URL}/transform_text`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ text: speechText })
+                    });
+
+                    if (transformResponse.ok) {
+                        const transformData = await transformResponse.json();
+                        if (transformData.success) {
+                            transformedText = transformData.transformed;
+                            // Generate tweet text right after getting transformed text
+                            tweetText = await generateTweetText(transformedText, videoId);
+                            await processingMessage.edit(
+                                `🎤 original: "${speechText}"\n` +
+                                `✨ transformed: "${transformedText}"\n` +
+                                `🐦 tweet draft: "${tweetText}"\n` +
+                                `🎵 now cookin up a beat...`
+                            );
+                        }
+                    }
+                } catch (error) {
+                    console.error('Error transforming text:', error);
+                    // Continue with original text if transformation fails
+                }
+            }
+        }
+
         // Generate the music
         const { task_id } = await generateMusic(youtubeUrl, timestamp);
         if (!task_id) {
@@ -344,15 +459,6 @@ async function handleGenerateCommand(message, youtubeUrl) {
         const audioData = await pollForTaskCompletion(task_id);
         const audioBuffer = Buffer.from(audioData, 'base64');
         const mp3Buffer = await convertToMP3(audioBuffer);
-        
-        // Store information in the cache
-        lastGenerationCache.set(message.channelId, {
-            taskId: task_id,
-            audioData: audioData,
-            videoId: videoId,
-            timestamp: timestamp,
-            frameBuffer: frameBuffer
-        });
 
         // First create the base video with VideoProcessor
         await processingMessage.edit("🎬 creating base video...");
@@ -366,12 +472,40 @@ async function handleGenerateCommand(message, youtubeUrl) {
         await processingMessage.edit("✨ adding glitch effects...");
         const finalVideoBuffer = await glitchProcessor.processVideoBuffer(baseVideoBuffer);
         
+        // Store everything in the cache
+        lastGenerationCache.set(message.channelId, {
+            taskId: task_id,
+            audioData: audioData,
+            videoId: videoId,
+            timestamp: timestamp,
+            frameBuffer: frameBuffer,
+            videoBuffer: finalVideoBuffer,
+            transcript: transformedText,        // Store transformed text
+            originalTranscript: speechText,     // Store original transcript
+            tweetText: tweetText,              // Store generated tweet text
+            mp3Buffer: mp3Buffer
+        });
+
         // Send both video and audio files
         const videoAttachment = new AttachmentBuilder(finalVideoBuffer, { name: 'marc_beats.mp4' });
         const audioAttachment = new AttachmentBuilder(mp3Buffer, { name: 'marc_beats.mp3' });
 
+        // Construct reply message with all information
+        let replyContent = `🎵 heres what i think.\n`;
+        if (speechText) {
+            replyContent += `🎤 original: "${speechText}"\n`;
+            if (transformedText) {
+                replyContent += `✨ transformed: "${transformedText}"\n`;
+            }
+            if (tweetText) {
+                replyContent += `🐦 tweet draft: "${tweetText}"\n`;
+            }
+        }
+        replyContent += `📺 original clip: ${youtubeUrl}\n`;
+        replyContent += `📱 say "post that" if u want me to tweet this`;
+
         await message.reply({
-            content: `🎵 heres what i think.\n📺 original clip: ${youtubeUrl}`,
+            content: replyContent,
             files: [videoAttachment, audioAttachment]
         });
 
@@ -385,7 +519,7 @@ async function handleGenerateCommand(message, youtubeUrl) {
     }
 }
 
-// Update the message event handler
+// Update the messageCreate event handler
 client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
 
@@ -405,6 +539,50 @@ client.on('messageCreate', async (message) => {
         await continueGeneration(message.channelId, message);
         return;
     }
+
+    // Handle "post that" command
+    if (message.mentions.has(client.user) && message.content.toLowerCase().includes('post that')) {
+    const lastGeneration = lastGenerationCache.get(message.channelId);
+    if (!lastGeneration) {
+        await message.reply('nothing to post yet! generate something first by mentioning me.');
+        return;
+    }
+
+    const processingMsg = await message.reply('📤 getting ready to post...');
+
+    try {
+        // Use the stored tweet text, or generate it if somehow missing
+        let tweetText = lastGeneration.tweetText;
+        if (!tweetText && lastGeneration.transcript) {
+            tweetText = await generateTweetText(lastGeneration.transcript, lastGeneration.videoId);
+        }
+
+        if (!tweetText) {
+            throw new Error('No tweet text available');
+        }
+
+        // Post the video
+        const result = await twitterHandler.postVideoWithText(
+            lastGeneration.videoBuffer,
+            tweetText
+        );
+
+        // If successful, reply with the tweet URL
+        if (result.success) {
+            let replyText = `✨ just posted this heat to twitter!\n` +
+                           `🐦 tweet: "${tweetText}"\n` +
+                           `🔗 check it: https://twitter.com/thepatch_gary/status/${result.tweetId}`;
+            
+            await processingMsg.edit(replyText);
+        } else {
+            throw new Error('Failed to post tweet');
+        }
+    } catch (error) {
+        console.error('Error posting to Twitter:', error);
+        await processingMsg.edit('😅 oops, something went wrong posting to twitter. try again?');
+    }
+    return;
+}
     
     // Handle other bot mentions (both @ mentions and replies)
     if (message.mentions.has(client.user) || message.type === 'REPLY') {
@@ -420,6 +598,8 @@ client.on('messageCreate', async (message) => {
             }
             
             const youtubeUrl = `https://youtube.com/watch?v=${videoId}&t=${timestamp}`;
+            
+            // We'll let handleGenerateCommand handle the transcription
             await handleGenerateCommand(message, youtubeUrl);
             
             await processingMsg.delete().catch(() => {});
@@ -431,13 +611,26 @@ client.on('messageCreate', async (message) => {
 });
 
 
+
 // Startup handler
-client.once('ready', () => {
+client.once('ready', async () => {
     console.log('🤖 Bot is online!');
     console.log('📊 Connected to servers:');
     client.guilds.cache.forEach(guild => {
         console.log(`   - ${guild.name} (${guild.id})`);
     });
+    
+    // Initialize Twitter handler
+    try {
+        const success = await twitterHandler.initialize();
+        if (success && twitterHandler.isInitialized) {
+            console.log('🐦 Twitter handler initialized successfully');
+        } else {
+            console.error('🐦 Twitter handler initialization failed');
+        }
+    } catch (error) {
+        console.error('Failed to initialize Twitter handler:', error);
+    }
 });
 
 // Start the bot

@@ -6,3 +6,5 @@ uvicorn
 requests
 opencv-python
 python-dotenv
+ffmpeg-python
+openai-whisper
