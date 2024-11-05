@@ -78,6 +78,9 @@ models/*.safetensors
 models/*.model
 # Add any other model file extensions you might use
 
+twitter-cookies.json
+twitter-upload.py
+
 # Logs
 twitter-client/logs
 twitter-client/*.log

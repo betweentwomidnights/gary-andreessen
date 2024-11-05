@@ -20,6 +20,7 @@ import tempfile
 from pathlib import Path
 import subprocess
 import shutil
+from typing import List
 
 # Initialize video processor
 video_processor = VideoProcessor()
@@ -37,6 +38,16 @@ class TweetRequest(BaseModel):
 
 class VideoTitleRequest(BaseModel):
     video_id: str
+
+class ReplyRequest(BaseModel):
+    tweet_text: str
+    test_mode: Optional[bool] = False
+
+class ReplyResponse(BaseModel):
+    response_text: str
+    video_id: str
+    timestamp: int
+    similarity_score: float
 
 PLAYLIST_ID = "PLTgvaF3a9YMipq-kfDW1Tkrl-sG7eTQqV"
 MAX_RETRIES = 3
@@ -489,6 +500,56 @@ Answer:"""
     
     return None
 
+async def verify_marc_speaking(text: str) -> bool:
+    """Verify if text matches Marc's speech patterns"""
+    # First, a simpler prompt that forces a single digit response
+    verify_prompt = """Rate if this sounds like Marc Andreessen speaking.
+Give ONLY a single digit 0-9, nothing else.
+
+Example response: 8
+
+Text: "%s"
+
+Single digit rating:""" % text
+
+    try:
+        verify_response = llm(
+            verify_prompt,
+            max_tokens=1,      # Force single token
+            temperature=0.1,   # Low temperature for consistency
+            stop=["\n", "\r", " ", ".", ",", ":", ";", "(", ")", "[", "]"],  # More stop tokens
+            echo=False
+        )
+        
+        # Log the raw response for debugging
+        logger.info(f"Raw LLama response object: {verify_response}")
+        
+        # Get the response text
+        response_text = verify_response['choices'][0]['text'].strip()
+        logger.info(f"Raw text response: '{response_text}'")
+        
+        # Check if we got a response
+        if not response_text:
+            logger.warning("Empty response received")
+            return False
+            
+        # Verify it's a single digit
+        if not response_text.isdigit() or len(response_text) != 1:
+            logger.warning(f"Response is not a single digit: '{response_text}'")
+            return False
+            
+        # Convert to integer
+        confidence = int(response_text)
+        logger.info(f"Confidence score: {confidence}/9")
+        
+        # Consider it Marc if confidence is 6 or higher
+        return confidence >= 6
+
+    except Exception as e:
+        logger.error(f"Error in speech verification: {e}")
+        logger.error(f"Full response data: {verify_response if 'verify_response' in locals() else 'No response'}")
+        return False
+
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "message": "LLM service is running"}
@@ -816,35 +877,58 @@ async def transform_text(request: TransformTextRequest):
     
 @app.post("/generate_tweet")
 async def generate_tweet(request: TweetRequest):
-    """Generate a tweet that preserves the transformed text while adding subtle topic context"""
+    """Generate a tweet that mostly preserves the already-good transformed text"""
     try:
-        # Extract meaningful topic words, keeping it simple
-        skip_words = {'joe', 'rogan', 'marc', 'andreessen', 'says', 'said', 'and', 'the', 'with', 'on'}
-        title_words = [word for word in request.video_title.lower().split() 
-                      if word not in skip_words and len(word) > 2]
-        topic_context = ' '.join(title_words[:3])  # Limit to 3 key words
+        # More robust name and common word filtering
+        skip_words = {
+            'joe', 'rogan', 'marc', 'andreessen', 'says', 'said', 'and', 'the', 'with', 'on',
+            'explains', 'discusses', 'talks', 'about', 'podcast', 'interview', 'chief',
+            'implications', 'regarding', 'analysis', 'perspective'
+        }
+        
+        # Split on spaces and special characters
+        title_parts = re.split(r'[\s\'"]+', request.video_title.lower())
+        
+        # More thorough name filtering - remove any part that contains our skip words
+        topic_words = []
+        for part in title_parts:
+            if len(part) > 2 and not any(skip in part.lower() for skip in skip_words):
+                topic_words.append(part.strip('.,!?#@'))
+        
+        topic_context = ' '.join(topic_words[:3])
         
         logger.info(f"Using transformed text: {request.transformed_text}")
         logger.info(f"With topic words: {topic_context}")
         
-        prompt = f"""Turn this into a tweet by gently mixing these topic words [{topic_context}] into the casual statement. Keep the original meaning and most words intact:
+        prompt = f"""Your input is already a great casual tweet. Just enhance it slightly with [{topic_context}] if it adds value - but if it doesn't fit naturally, keep the original. Use that twitter talk in the first person bro.
 
-{request.transformed_text}"""
+Original casual tweet: {request.transformed_text}
+
+Slightly enhanced tweet (keep at least 90% the same):"""
 
         response = llm(
             prompt,
-            max_tokens=60,
-            temperature=0.7,
-            stop=["\n", "\r"],
+            max_tokens=30,  # Allow more room since we want to preserve length
+            temperature=0.5,  # Lower temperature for more faithful preservation
+            stop=["\n", "\r", "#"],
             echo=False
         )
         
         tweet_text = response['choices'][0]['text'].strip()
-        tweet_text = tweet_text.replace('"', '').lower().strip('.')
         
-        # Add emoji if none present
-        if not any(char in tweet_text for char in ['🔥', '💯', '🚀', '💪', '🤔', '😤']):
-            tweet_text += ' 🔥'
+        # Clean up but preserve existing slang/style
+        tweet_text = tweet_text.lower()
+        tweet_text = tweet_text.replace('"', '')
+        tweet_text = tweet_text.replace('#', '')
+        tweet_text = tweet_text.strip('.,!? ')
+        
+        # Only add an ending if the text is very short or has no expression
+        if len(tweet_text) < 10 or not any(char in tweet_text for char in ['🔥', '💯', '🚀', '💪', '🤔', '😤', '💀', '😳', 'fr', 'wtf', 'ngl']):
+            tweet_text += ' fr fr 🔥'
+        
+        # If the result is too short, return the original transformed text with an emoji
+        if len(tweet_text) < 20:
+            tweet_text = request.transformed_text + ' 🔥'
         
         logger.info(f"Generated tweet: {tweet_text}")
             
@@ -881,6 +965,189 @@ async def get_video_title_endpoint(request: VideoTitleRequest):
         raise HTTPException(
             status_code=500,
             detail=f"Error fetching video title: {str(e)}"
+        )
+    
+@app.post("/generate_reply")
+async def generate_reply(request: ReplyRequest):
+    """Generate a snarky reply and find a matching Marc clip"""
+    try:
+        # Step 1: Generate snarky response (this part stays the same)
+        prompt = f"""Generate a short, snarky response to this tweet, speaking as an AI that makes music beats. 
+        Use casual twitter slang, emojis, and sound effect words. Keep it playful and fun, not mean.
+        
+Tweet: "{request.tweet_text}"
+
+Response (short, fun, casual):"""
+
+        response = llm(
+            prompt,
+            max_tokens=30,
+            temperature=0.8,
+            stop=["\n", "\r"],
+            echo=False
+        )
+        
+        response_text = response['choices'][0]['text'].strip()
+        response_text = response_text.lower().replace('"', '').strip('.,!? ')
+        
+        if not any(char in response_text for char in ['🎵', '🔥', '🎶', '💯', '🚀', '✨']):
+            response_text += ' 🎵🔥'
+
+        logger.info(f"Generated response: {response_text}")
+
+        # For testing mode, return hardcoded values
+        if request.test_mode:
+            return {
+                "response_text": response_text,
+                "video_id": "a16z-PTsCCY",
+                "timestamp": 180,
+                "similarity_score": 0.8
+            }
+
+        # Step 2: Extract topic words
+        topic_prompt = f"""Extract 3-5 key topic words from this tweet, focusing on actionable or descriptive words.
+        Ignore usernames, common words, and @mentions. Return only the words, separated by spaces.
+
+Tweet: "{request.tweet_text}"
+
+Key topic words:"""
+
+        topic_response = llm(
+            topic_prompt,
+            max_tokens=20,
+            temperature=0.2,
+            stop=["\n", "\r"],
+            echo=False
+        )
+        
+        topic_words = topic_response['choices'][0]['text'].strip().lower().split()
+        logger.info(f"Extracted topic words: {topic_words}")
+
+        # Step 3: Search through videos until we find a good match
+        best_match = {
+            "video_id": None,
+            "timestamp": None,
+            "score": 0
+        }
+
+        max_attempts = 10
+        attempts = 0
+
+        while attempts < max_attempts and best_match["score"] < 0.7:
+            attempts += 1
+            
+            try:
+                # Get a random video
+                video_id = (await get_random_video())["video_id"]
+                logger.info(f"\nChecking video {video_id} (attempt {attempts}/{max_attempts})")
+                
+                # First find timestamps where Marc is speaking
+                marc_timestamp = await find_marc_timestamp(video_id)
+                if not marc_timestamp:
+                    logger.info(f"No clear Marc speech found in video {video_id}")
+                    continue
+
+                # Verify the clip with transcription
+                success, clip_path = video_processor.get_video_clip(video_id, marc_timestamp)
+                if not success:
+                    continue
+
+                verification_text = transcribe_video_file(clip_path)
+                if not verification_text:
+                    continue
+
+                is_marc = await verify_marc_speaking(verification_text)
+                if not is_marc:
+                    logger.info(f"Speech pattern validation failed - confidence too low")
+                    continue
+
+                logger.info(f"Found Marc speaking at {marc_timestamp}")
+                
+                # Get transcript around this timestamp
+                transcript = await get_video_transcript(video_id)
+                if not transcript:
+                    continue
+
+                chunks = get_transcript_chunks(transcript)
+                
+                # Look for topic matches in chunks near Marc's speech
+                for timestamp, chunk_text in chunks:
+                    chunk_time = convert_vtt_timestamp_to_seconds(timestamp)
+                    
+                    # Only check chunks within 30 seconds of where Marc starts speaking
+                    if abs(chunk_time - marc_timestamp) > 30:
+                        continue
+
+                    # Count matching topic words
+                    chunk_lower = chunk_text.lower()
+                    matching_words = sum(1 for word in topic_words if word in chunk_lower)
+                    
+                    if matching_words >= 1:  # Even one match might be interesting
+                        base_score = matching_words / len(topic_words)
+                        
+                        logger.info(f"\nAnalyzing potential match:")
+                        logger.info(f"Timestamp: {timestamp}")
+                        logger.info(f"Text: {chunk_text}")
+                        logger.info(f"Matching words: {matching_words}")
+                        
+                        relevance_prompt = f"""Rate how relevant this clip is to these topics on a scale of 0-10.
+                        Consider context and meaning, not just word matching.
+
+Topics: {', '.join(topic_words)}
+
+Clip: {chunk_text}
+
+Rating (just the number 0-10):"""
+
+                        relevance_response = llm(
+                            relevance_prompt,
+                            max_tokens=2,
+                            temperature=0.2,
+                            stop=["\n", "\r", " "],
+                            echo=False
+                        )
+
+                        try:
+                            relevance_score = float(relevance_response['choices'][0]['text'].strip()) / 10
+                            final_score = (base_score + relevance_score) / 2
+                            
+                            logger.info(f"Score: {final_score}")
+                            
+                            if final_score > best_match["score"]:
+                                best_match = {
+                                    "video_id": video_id,
+                                    "timestamp": chunk_time,
+                                    "score": final_score
+                                }
+                                
+                                if final_score > 0.7:
+                                    break
+
+                        except ValueError:
+                            continue
+
+            except Exception as e:
+                logger.error(f"Error processing video {video_id}: {e}")
+                continue
+
+        if best_match["video_id"] is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Could not find a matching clip"
+            )
+
+        return {
+            "response_text": response_text,
+            "video_id": best_match["video_id"],
+            "timestamp": best_match["timestamp"],
+            "similarity_score": best_match["score"]
+        }
+
+    except Exception as e:
+        logger.error(f"Error generating reply: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error generating reply: {str(e)}"
         )
 
 if __name__ == "__main__":

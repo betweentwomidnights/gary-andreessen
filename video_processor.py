@@ -19,15 +19,30 @@ class VideoProcessor:
         output_path = os.path.join(self.temp_dir, f"{video_id}_{start_time}_{duration}.mp4")
         
         if os.path.exists(output_path):
-            return output_path
+            # Verify the existing file is valid
+            try:
+                cap = cv2.VideoCapture(output_path)
+                if not cap.isOpened():
+                    logger.warning(f"Existing file at {output_path} is invalid, removing...")
+                    os.remove(output_path)
+                else:
+                    cap.release()
+                    return output_path
+            except Exception as e:
+                logger.warning(f"Error checking existing file: {e}")
+                if os.path.exists(output_path):
+                    os.remove(output_path)
 
         ydl_opts = {
             'format': 'best[ext=mp4]',
             'outtmpl': output_path,
-            # Use external downloader with time range
             'external_downloader': 'ffmpeg',
             'external_downloader_args': {
-                'ffmpeg_i': ['-ss', str(start_time), '-t', str(duration)]
+                'ffmpeg_i': [
+                    '-ss', str(max(0, start_time)),  # Ensure non-negative
+                    '-t', str(duration),
+                    '-avoid_negative_ts', 'make_zero'  # Handle negative timestamps
+                ]
             },
             'postprocessors': [{
                 'key': 'FFmpegVideoConvertor',
@@ -39,7 +54,16 @@ class VideoProcessor:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 url = f"https://www.youtube.com/watch?v={video_id}"
                 ydl.download([url])
-                return output_path if os.path.exists(output_path) else None
+                
+                # Verify the downloaded file
+                if os.path.exists(output_path):
+                    cap = cv2.VideoCapture(output_path)
+                    if not cap.isOpened():
+                        logger.error("Downloaded file exists but cannot be opened")
+                        return None
+                    cap.release()
+                    return output_path
+                return None
         except Exception as e:
             logger.error(f"Error downloading video segment: {e}")
             return None
@@ -120,3 +144,50 @@ class VideoProcessor:
         except Exception as e:
             logger.error(f"Error in get_last_frame_from_clip: {e}")
             return False, None
+        
+    def _extract_frame_method1(self, video_path: str, video_id: str, timestamp: int) -> Tuple[bool, Optional[str]]:
+            """Standard OpenCV frame extraction"""
+            cap = cv2.VideoCapture(video_path)
+            ret, frame = cap.read()
+            cap.release()
+
+            if not ret or frame is None:
+                return False, None
+
+            frame_path = os.path.join(self.temp_dir, f"{video_id}_{timestamp}_frame.jpg")
+            cv2.imwrite(frame_path, frame)
+            return True, frame_path
+
+    def _extract_frame_method2(self, video_path: str, video_id: str, timestamp: int) -> Tuple[bool, Optional[str]]:
+        """Extract frame using FFmpeg directly"""
+        frame_path = os.path.join(self.temp_dir, f"{video_id}_{timestamp}_frame.jpg")
+        try:
+            import subprocess
+            cmd = [
+                'ffmpeg', '-i', video_path,
+                '-vf', 'select=eq(n\\,0)',
+                '-vframes', '1',
+                frame_path
+            ]
+            subprocess.run(cmd, check=True, capture_output=True)
+            return True, frame_path
+        except Exception as e:
+            logger.warning(f"FFmpeg extraction failed: {e}")
+            return False, None
+
+    def _extract_frame_method3(self, video_path: str, video_id: str, timestamp: int) -> Tuple[bool, Optional[str]]:
+        """Extract frame by seeking to specific position"""
+        cap = cv2.VideoCapture(video_path)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        if frame_count > 0:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count // 2)  # Try middle frame
+            ret, frame = cap.read()
+            cap.release()
+
+            if ret and frame is not None:
+                frame_path = os.path.join(self.temp_dir, f"{video_id}_{timestamp}_frame.jpg")
+                cv2.imwrite(frame_path, frame)
+                return True, frame_path
+
+        return False, None

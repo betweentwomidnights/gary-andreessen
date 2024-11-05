@@ -311,71 +311,77 @@ class TwitterHandler {
         .join(', ');
     }
 
-    async tweet(text, mediaId) {
-        console.log('Posting tweet using v2 API with OAuth 1.0a...');
-        
-        const tweetData = {
-            text: text,
-            media: {
-                media_ids: [mediaId]
-            }
-        };
-
-        console.log('Tweet payload:', JSON.stringify(tweetData, null, 2));
-
-        // Convert the JSON body to a string for OAuth signing
-        const jsonBody = JSON.stringify(tweetData);
-        
-        // Generate OAuth 1.0a headers
-        const authHeader = this.generateOAuthHeaders('POST', this.POST_TWEET_URL);
-
-        const headers = {
-            'Authorization': authHeader,
-            'Content-Type': 'application/json',
-            'Accept': 'application/json'
-        };
-
-        console.log('Using headers:', {
-            ...headers,
-            'Authorization': authHeader.substring(0, 50) + '...' // Truncate for logging
-        });
-
-        const response = await fetch(this.POST_TWEET_URL, {
-            method: 'POST',
-            headers: headers,
-            body: jsonBody
-        });
-
-        const responseText = await response.text();
-        console.log('Tweet Response:', responseText);
-
-        if (!response.ok) {
-            throw new Error(`Tweet failed: ${responseText}`);
+    async tweet(text, mediaId, replyToId = null) {  // Add replyToId parameter
+    console.log('Posting tweet using v2 API with OAuth 1.0a...');
+    
+    const tweetData = {
+        text: text,
+        media: {
+            media_ids: [mediaId]
         }
+    };
 
-        const responseData = JSON.parse(responseText);
-        
-        // Handle v2 response format
-        return {
-            id_str: responseData.data.id,
-            text: responseData.data.text
+    // Add reply fields if we're replying to a tweet
+    if (replyToId) {
+        tweetData.reply = {
+            in_reply_to_tweet_id: replyToId
         };
     }
 
-    async postVideoWithText(videoBuffer, text) {
+    console.log('Tweet payload:', JSON.stringify(tweetData, null, 2));
+
+    // Convert the JSON body to a string for OAuth signing
+    const jsonBody = JSON.stringify(tweetData);
+    
+    // Generate OAuth 1.0a headers
+    const authHeader = this.generateOAuthHeaders('POST', this.POST_TWEET_URL);
+
+    const headers = {
+        'Authorization': authHeader,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+    };
+
+    console.log('Using headers:', {
+        ...headers,
+        'Authorization': authHeader.substring(0, 50) + '...' // Truncate for logging
+    });
+
+    const response = await fetch(this.POST_TWEET_URL, {
+        method: 'POST',
+        headers: headers,
+        body: jsonBody
+    });
+
+    const responseText = await response.text();
+    console.log('Tweet Response:', responseText);
+
+    if (!response.ok) {
+        throw new Error(`Tweet failed: ${responseText}`);
+    }
+
+    const responseData = JSON.parse(responseText);
+    
+    return {
+        id_str: responseData.data.id,
+        text: responseData.data.text
+    };
+}
+
+    async postVideoWithText(videoBuffer, text, replyToId = null) {  // Add replyToId parameter
         if (!this.isInitialized) {
             await this.initialize();
         }
 
         try {
-            const formattedText = text ? `"${text}" @pmarca @ai16z` : "got sumthin to say @pmarca @ai16z";
-            
+            const formattedText = text ? `${text}` : "got sumthin to say @pmarca @ai16z";
+        
             // First upload and process the video (using v1.1 API)
             const mediaId = await this.uploadMediaToTwitter(videoBuffer);
             console.log('Video uploaded successfully, media_id:', mediaId);
-            
+        
             // Then post the tweet with the processed video (using v2 API)
-            const tweetResult = await this.tweet(formattedText, mediaId);
+            const tweetResult = await this.tweet(formattedText, mediaId, replyToId);
 
             return {
                 success: true,

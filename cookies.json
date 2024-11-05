@@ -1,0 +1,56 @@
+[
+  {
+    "key": "guest_id_marketing",
+    "value": "v1%3A173076702743264884",
+    "domain": "twitter.com",
+    "path": "/"
+  },
+  {
+    "key": "guest_id_ads",
+    "value": "v1%3A173076702743264884",
+    "domain": "twitter.com",
+    "path": "/"
+  },
+  {
+    "key": "personalization_id",
+    "value": "\"v1_LeTN4MyeWIr9pqcy4zoieQ==\"",
+    "domain": "twitter.com",
+    "path": "/"
+  },
+  {
+    "key": "guest_id",
+    "value": "v1%3A173076702743264884",
+    "domain": "twitter.com",
+    "path": "/"
+  },
+  {
+    "key": "kdt",
+    "value": "va4a3znZvmugblnlAbTlbpUaDXAOwPwdkh4FOzxP",
+    "domain": "twitter.com",
+    "path": "/"
+  },
+  {
+    "key": "twid",
+    "value": "\"u=1851424448265527296\"",
+    "domain": "twitter.com",
+    "path": "/"
+  },
+  {
+    "key": "ct0",
+    "value": "d27b2ae30beae82174bcbc6cbe11c6fdc20e42b26ac6b46e245ea679cfb77323c9ba44f884963c71d51c33d877744f4d0b787a7aa2a1869f650a67632977965ae366472f7fdd75df6cd7dc169972648d",
+    "domain": "twitter.com",
+    "path": "/"
+  },
+  {
+    "key": "auth_token",
+    "value": "45280372ebb1e1401a6b297a1dc915e1b584d26b",
+    "domain": "twitter.com",
+    "path": "/"
+  },
+  {
+    "key": "att",
+    "value": "1-unvbgxCTP06M1qSQwfv3IoNhNMjhdyxSGIP4XOuT",
+    "domain": "twitter.com",
+    "path": "/"
+  }
+]
